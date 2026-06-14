@@ -2,110 +2,227 @@
 
 import React, { useState } from "react";
 import { TableConfig } from "@/app/tableConfig";
+import type { HistoryAction } from "@/lib/types";
+
+export interface CommitDescriptor {
+  action: HistoryAction;
+  description: string;
+}
 
 interface DataTableProps {
   config: TableConfig;
-  onUpdate: (updatedConfig: TableConfig) => void;
+  /** Whether the current visitor is allowed to edit. */
+  canEdit: boolean;
+  /**
+   * Persist a change. Returns true on success; on false the table rolls its
+   * local draft back to the last server-confirmed state.
+   */
+  onCommit: (updated: TableConfig, descriptor: CommitDescriptor) => Promise<boolean>;
+  /** Invoked when an unauthenticated visitor attempts to edit. */
+  onAuthRequired: () => void;
 }
 
-export default function DataTable({ config, onUpdate }: DataTableProps) {
+export default function DataTable({
+  config,
+  canEdit,
+  onCommit,
+  onAuthRequired,
+}: DataTableProps) {
   const [searchQuery, setSearchQuery] = useState("");
+  // Local working copy. Keystrokes update this instantly; we persist (and log
+  // history) only on blur / structural actions to avoid one entry per keypress.
+  const [draft, setDraft] = useState<TableConfig>(config);
+  // Buffer for the column header currently being renamed (the rename + key
+  // remap is only applied on blur, never mid-typing).
+  const [editingCol, setEditingCol] = useState<{ idx: number; value: string } | null>(
+    null,
+  );
 
-  const filteredRows = config.rows.filter((row) => {
+  // Re-sync the draft whenever the server-confirmed config changes (React's
+  // "adjust state during render" pattern — no effect needed).
+  const [syncedConfig, setSyncedConfig] = useState(config);
+  if (syncedConfig !== config) {
+    setSyncedConfig(config);
+    setDraft(config);
+  }
+
+  const filteredRows = draft.rows.filter((row) => {
     if (!searchQuery) return true;
     const query = searchQuery.toLowerCase();
-    return config.columns.some((col) => {
+    return draft.columns.some((col) => {
       const cellValue = row[col];
       if (cellValue === null || cellValue === undefined) return false;
       return String(cellValue).toLowerCase().includes(query);
     });
   });
 
-  const handleTitleChange = (val: string) => {
-    onUpdate({ ...config, tableTitle: val });
+  /** Optimistically apply a change, persist it, and roll back on failure. */
+  const doCommit = async (newConfig: TableConfig, descriptor: CommitDescriptor) => {
+    setDraft(newConfig);
+    const ok = await onCommit(newConfig, descriptor);
+    if (!ok) setDraft(config);
   };
 
-  const handleSubtitleChange = (val: string) => {
-    onUpdate({ ...config, tableSubtitle: val });
-  };
+  // Props that turn an input into a "click to sign in" control for visitors.
+  const lockProps = canEdit
+    ? {}
+    : {
+        readOnly: true,
+        onMouseDown: (e: React.MouseEvent) => {
+          e.preventDefault();
+          onAuthRequired();
+        },
+        onFocus: (e: React.FocusEvent<HTMLInputElement>) => {
+          e.currentTarget.blur();
+          onAuthRequired();
+        },
+      };
 
-  const handleColumnNameChange = (colIdx: number, newName: string) => {
-    const oldName = config.columns[colIdx];
-    const newColumns = [...config.columns];
-    newColumns[colIdx] = newName;
+  // --- Title / subtitle -----------------------------------------------------
 
-    const newRows = config.rows.map((row) => {
-      const newRow = { ...row };
-      if (oldName !== newName) {
-        newRow[newName] = newRow[oldName] !== undefined ? newRow[oldName] : "";
-        delete newRow[oldName];
-      }
-      return newRow;
+  const handleTitleBlur = () => {
+    if (draft.tableTitle === config.tableTitle) return;
+    doCommit(draft, {
+      action: "update_title",
+      description: `Renamed table to "${draft.tableTitle}"`,
     });
-
-    onUpdate({ ...config, columns: newColumns, rows: newRows });
   };
 
-  const handleCellChange = (rowIndex: number, colName: string, value: any) => {
-    const originalIndex = config.rows.indexOf(filteredRows[rowIndex]);
+  const handleSubtitleBlur = () => {
+    if (draft.tableSubtitle === config.tableSubtitle) return;
+    doCommit(draft, {
+      action: "update_subtitle",
+      description: `Updated the subtitle of "${config.tableTitle}"`,
+    });
+  };
+
+  // --- Column rename --------------------------------------------------------
+
+  const commitColumnRename = (idx: number) => {
+    if (!editingCol || editingCol.idx !== idx) return;
+    const newName = editingCol.value.trim();
+    const oldName = draft.columns[idx];
+    setEditingCol(null);
+    if (!newName || newName === oldName) return;
+    // Refuse a rename that would collide with another column (would merge data).
+    if (draft.columns.some((c, i) => i !== idx && c === newName)) return;
+
+    const newColumns = [...draft.columns];
+    newColumns[idx] = newName;
+    const newRows = draft.rows.map((row) => {
+      const next = { ...row };
+      next[newName] = next[oldName] !== undefined ? next[oldName] : "";
+      delete next[oldName];
+      return next;
+    });
+    doCommit(
+      { ...draft, columns: newColumns, rows: newRows },
+      {
+        action: "rename_column",
+        description: `Renamed column "${oldName}" to "${newName}" in "${config.tableTitle}"`,
+      },
+    );
+  };
+
+  // --- Cells ----------------------------------------------------------------
+
+  const handleCellChange = (rowIndex: number, col: string, value: string) => {
+    const originalIndex = draft.rows.indexOf(filteredRows[rowIndex]);
     if (originalIndex === -1) return;
-
-    const newRows = [...config.rows];
-    newRows[originalIndex] = { ...newRows[originalIndex], [colName]: value };
-    onUpdate({ ...config, rows: newRows });
+    const newRows = [...draft.rows];
+    newRows[originalIndex] = { ...newRows[originalIndex], [col]: value };
+    setDraft({ ...draft, rows: newRows });
   };
+
+  const handleCellBlur = (rowIndex: number, col: string) => {
+    const originalIndex = draft.rows.indexOf(filteredRows[rowIndex]);
+    if (originalIndex === -1) return;
+    const newVal = String(draft.rows[originalIndex]?.[col] ?? "");
+    const oldVal = String(config.rows[originalIndex]?.[col] ?? "");
+    if (newVal === oldVal) return;
+    doCommit(draft, {
+      action: "update_cell",
+      description: `Edited "${col}" in row ${originalIndex + 1} of "${config.tableTitle}"`,
+    });
+  };
+
+  // --- Structural actions (persist immediately) -----------------------------
 
   const handleAddRow = () => {
-    const newRow: Record<string, any> = {};
-    config.columns.forEach((col) => {
+    if (!canEdit) return onAuthRequired();
+    const newRow: Record<string, unknown> = {};
+    draft.columns.forEach((col) => {
       newRow[col] = "";
     });
-    onUpdate({ ...config, rows: [...config.rows, newRow] });
+    doCommit(
+      { ...draft, rows: [...draft.rows, newRow] },
+      { action: "add_row", description: `Added a row to "${config.tableTitle}"` },
+    );
   };
 
   const handleDeleteRow = (rowIndex: number) => {
-    const originalIndex = config.rows.indexOf(filteredRows[rowIndex]);
+    if (!canEdit) return onAuthRequired();
+    const originalIndex = draft.rows.indexOf(filteredRows[rowIndex]);
     if (originalIndex === -1) return;
-
-    const newRows = config.rows.filter((_, idx) => idx !== originalIndex);
-    onUpdate({ ...config, rows: newRows });
+    const newRows = draft.rows.filter((_, idx) => idx !== originalIndex);
+    doCommit(
+      { ...draft, rows: newRows },
+      {
+        action: "delete_row",
+        description: `Deleted row ${originalIndex + 1} from "${config.tableTitle}"`,
+      },
+    );
   };
 
   const handleAddColumn = () => {
+    if (!canEdit) return onAuthRequired();
     const baseName = "New Column";
     let colName = baseName;
     let counter = 1;
-    while (config.columns.includes(colName)) {
+    while (draft.columns.includes(colName)) {
       colName = `${baseName} ${counter}`;
       counter++;
     }
-
-    const newColumns = [...config.columns, colName];
-    const newRows = config.rows.map((row) => ({ ...row, [colName]: "" }));
-    onUpdate({ ...config, columns: newColumns, rows: newRows });
+    const newColumns = [...draft.columns, colName];
+    const newRows = draft.rows.map((row) => ({ ...row, [colName]: "" }));
+    doCommit(
+      { ...draft, columns: newColumns, rows: newRows },
+      {
+        action: "add_column",
+        description: `Added column "${colName}" to "${config.tableTitle}"`,
+      },
+    );
   };
 
   const handleDeleteColumn = (colIdx: number) => {
-    const colName = config.columns[colIdx];
-    const newColumns = config.columns.filter((_, idx) => idx !== colIdx);
-    const newRows = config.rows.map((row) => {
-      const newRow = { ...row };
-      delete newRow[colName];
-      return newRow;
+    if (!canEdit) return onAuthRequired();
+    const colName = draft.columns[colIdx];
+    const newColumns = draft.columns.filter((_, idx) => idx !== colIdx);
+    const newRows = draft.rows.map((row) => {
+      const next = { ...row };
+      delete next[colName];
+      return next;
     });
-    onUpdate({ ...config, columns: newColumns, rows: newRows });
+    doCommit(
+      { ...draft, columns: newColumns, rows: newRows },
+      {
+        action: "delete_column",
+        description: `Deleted column "${colName}" from "${config.tableTitle}"`,
+      },
+    );
   };
 
+  // --- Exports (read-only, available to everyone) ---------------------------
+
   const handleDownloadCSV = () => {
-    const headers = ["S.No.", ...config.columns];
+    const headers = ["S.No.", ...draft.columns];
     const csvRows = [
       headers.map((h) => `"${String(h).replace(/"/g, '""')}"`).join(","),
     ];
-
     filteredRows.forEach((row, index) => {
       const rowValues = [
         String(index + 1),
-        ...config.columns.map((col) => {
+        ...draft.columns.map((col) => {
           const val = row[col] !== undefined ? row[col] : "";
           return `"${String(val).replace(/"/g, '""')}"`;
         }),
@@ -117,11 +234,18 @@ export default function DataTable({ config, onUpdate }: DataTableProps) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    link.setAttribute("download", `${config.id}-export.csv`);
+    link.setAttribute("download", `${draft.id}-export.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
+
+  const escapeHtml = (value: unknown) =>
+    String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
 
   const handleDownloadPDF = () => {
     const printWindow = window.open("", "_blank");
@@ -131,69 +255,29 @@ export default function DataTable({ config, onUpdate }: DataTableProps) {
       <!DOCTYPE html>
       <html>
         <head>
-          <title>${config.tableTitle}</title>
+          <title>${escapeHtml(draft.tableTitle)}</title>
           <style>
-            body {
-              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-              padding: 40px 24px;
-              color: #111827;
-              background-color: #ffffff;
-            }
-            .header-container {
-              border-bottom: 2px solid #003366;
-              padding-bottom: 12px;
-              margin-bottom: 24px;
-            }
-            h1 {
-              color: #003366;
-              margin: 0 0 6px 0;
-              font-size: 22px;
-              font-weight: 700;
-            }
-            .subtitle {
-              color: #4b5563;
-              margin: 0;
-              font-size: 13px;
-            }
-            table {
-              width: 100%;
-              border-collapse: collapse;
-              margin-top: 16px;
-            }
-            th, td {
-              border: 1px solid #e5e7eb;
-              padding: 10px 12px;
-              text-align: left;
-              font-size: 12px;
-            }
-            th {
-              background-color: #003366;
-              color: #ffffff;
-              font-weight: 600;
-            }
-            tr:nth-child(even) {
-              background-color: #f0f7ff;
-            }
-            .footer {
-              margin-top: 40px;
-              border-top: 1px solid #e5e7eb;
-              padding-top: 12px;
-              font-size: 10px;
-              color: #6b7280;
-              text-align: center;
-            }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 40px 24px; color: #111827; background-color: #ffffff; }
+            .header-container { border-bottom: 2px solid #003366; padding-bottom: 12px; margin-bottom: 24px; }
+            h1 { color: #003366; margin: 0 0 6px 0; font-size: 22px; font-weight: 700; }
+            .subtitle { color: #4b5563; margin: 0; font-size: 13px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+            th, td { border: 1px solid #e5e7eb; padding: 10px 12px; text-align: left; font-size: 12px; }
+            th { background-color: #003366; color: #ffffff; font-weight: 600; }
+            tr:nth-child(even) { background-color: #f0f7ff; }
+            .footer { margin-top: 40px; border-top: 1px solid #e5e7eb; padding-top: 12px; font-size: 10px; color: #6b7280; text-align: center; }
           </style>
         </head>
         <body>
           <div class="header-container">
-            <h1>${config.tableTitle}</h1>
-            <p class="subtitle">${config.tableSubtitle}</p>
+            <h1>${escapeHtml(draft.tableTitle)}</h1>
+            <p class="subtitle">${escapeHtml(draft.tableSubtitle)}</p>
           </div>
           <table>
             <thead>
               <tr>
                 <th style="width: 60px;">S.No.</th>
-                ${config.columns.map((col) => `<th>${col}</th>`).join("")}
+                ${draft.columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")}
               </tr>
             </thead>
             <tbody>
@@ -202,11 +286,8 @@ export default function DataTable({ config, onUpdate }: DataTableProps) {
                   (row, index) => `
                 <tr>
                   <td>${index + 1}</td>
-                  ${config.columns
-                    .map((col) => `<td>${row[col] !== undefined ? row[col] : ""}</td>`)
-                    .join("")}
-                </tr>
-              `
+                  ${draft.columns.map((col) => `<td>${escapeHtml(row[col])}</td>`).join("")}
+                </tr>`,
                 )
                 .join("")}
             </tbody>
@@ -217,9 +298,7 @@ export default function DataTable({ config, onUpdate }: DataTableProps) {
           <script>
             window.onload = function() {
               window.print();
-              window.onafterprint = function() {
-                window.close();
-              };
+              window.onafterprint = function() { window.close(); };
             }
           </script>
         </body>
@@ -229,30 +308,36 @@ export default function DataTable({ config, onUpdate }: DataTableProps) {
     printWindow.document.close();
   };
 
+  // --------------------------------------------------------------------------
+
   return (
     <div className="bg-white border border-gray-200 rounded-none p-6">
       {/* Title & Buttons Row */}
       <div className="flex flex-col md:flex-row md:items-start md:justify-between border-b border-gray-100 pb-4 mb-4 gap-4">
         <div className="flex-grow w-full md:max-w-xl">
-          <label htmlFor={`title-${config.id}`} className="sr-only">
+          <label htmlFor={`title-${draft.id}`} className="sr-only">
             Edit Table Title
           </label>
           <input
-            id={`title-${config.id}`}
+            id={`title-${draft.id}`}
             type="text"
-            value={config.tableTitle}
-            onChange={(e) => handleTitleChange(e.target.value)}
+            value={draft.tableTitle}
+            onChange={(e) => setDraft({ ...draft, tableTitle: e.target.value })}
+            onBlur={handleTitleBlur}
+            {...lockProps}
             className="text-xl font-bold text-[#003366] bg-transparent border-b border-transparent hover:border-gray-200 focus:border-[#003366] focus:outline-none w-full"
             placeholder="Table Title"
           />
-          <label htmlFor={`subtitle-${config.id}`} className="sr-only">
+          <label htmlFor={`subtitle-${draft.id}`} className="sr-only">
             Edit Table Subtitle / Source
           </label>
           <input
-            id={`subtitle-${config.id}`}
+            id={`subtitle-${draft.id}`}
             type="text"
-            value={config.tableSubtitle}
-            onChange={(e) => handleSubtitleChange(e.target.value)}
+            value={draft.tableSubtitle}
+            onChange={(e) => setDraft({ ...draft, tableSubtitle: e.target.value })}
+            onBlur={handleSubtitleBlur}
+            {...lockProps}
             className="text-xs text-gray-500 bg-transparent border-b border-transparent hover:border-gray-200 focus:border-[#003366] focus:outline-none w-full mt-1"
             placeholder="Subtitle / Source"
           />
@@ -291,11 +376,11 @@ export default function DataTable({ config, onUpdate }: DataTableProps) {
 
       {/* Filter / Search Input */}
       <div className="mb-4">
-        <label htmlFor={`search-${config.id}`} className="sr-only">
+        <label htmlFor={`search-${draft.id}`} className="sr-only">
           Search Table
         </label>
         <input
-          id={`search-${config.id}`}
+          id={`search-${draft.id}`}
           type="text"
           placeholder="Search within table..."
           value={searchQuery}
@@ -312,37 +397,65 @@ export default function DataTable({ config, onUpdate }: DataTableProps) {
               <th scope="col" className="px-4 py-3 font-semibold w-16 text-center">
                 S.No.
               </th>
-              {config.columns.map((col, idx) => (
-                <th key={idx} scope="col" className="px-4 py-3 font-semibold min-w-[150px]">
-                  <div className="flex items-center gap-1 group">
-                    <input
-                      type="text"
-                      value={col}
-                      onChange={(e) => handleColumnNameChange(idx, e.target.value)}
-                      className="bg-transparent text-white border-b border-transparent hover:border-blue-400 focus:border-white focus:outline-none w-full text-sm font-semibold"
-                    />
-                    <button
-                      onClick={() => handleDeleteColumn(idx)}
-                      title="Delete Column"
-                      type="button"
-                      className="text-red-300 hover:text-red-500 hover:bg-white/10 p-0.5 rounded transition duration-150 ml-1 cursor-pointer"
-                    >
-                      <svg
-                        className="w-3.5 h-3.5"
-                        fill="currentColor"
-                        viewBox="0 0 20 20"
-                        xmlns="http://www.w3.org/2000/svg"
+              {draft.columns.map((col, idx) => {
+                const headerValue =
+                  editingCol && editingCol.idx === idx ? editingCol.value : col;
+                return (
+                  <th
+                    key={idx}
+                    scope="col"
+                    className="px-4 py-3 font-semibold min-w-[150px]"
+                  >
+                    <div className="flex items-center gap-1 group">
+                      <input
+                        type="text"
+                        value={headerValue}
+                        readOnly={!canEdit}
+                        onMouseDown={
+                          canEdit
+                            ? undefined
+                            : (e) => {
+                                e.preventDefault();
+                                onAuthRequired();
+                              }
+                        }
+                        onFocus={
+                          canEdit
+                            ? () => setEditingCol({ idx, value: col })
+                            : (e) => {
+                                e.currentTarget.blur();
+                                onAuthRequired();
+                              }
+                        }
+                        onChange={(e) =>
+                          setEditingCol({ idx, value: e.target.value })
+                        }
+                        onBlur={() => commitColumnRename(idx)}
+                        className="bg-transparent text-white border-b border-transparent hover:border-blue-400 focus:border-white focus:outline-none w-full text-sm font-semibold"
+                      />
+                      <button
+                        onClick={() => handleDeleteColumn(idx)}
+                        title="Delete Column"
+                        type="button"
+                        className="text-red-300 hover:text-red-500 hover:bg-white/10 p-0.5 rounded transition duration-150 ml-1 cursor-pointer"
                       >
-                        <path
-                          fillRule="evenodd"
-                          d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z"
-                          clipRule="evenodd"
-                        />
-                      </svg>
-                    </button>
-                  </div>
-                </th>
-              ))}
+                        <svg
+                          className="w-3.5 h-3.5"
+                          fill="currentColor"
+                          viewBox="0 0 20 20"
+                          xmlns="http://www.w3.org/2000/svg"
+                        >
+                          <path
+                            fillRule="evenodd"
+                            d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z"
+                            clipRule="evenodd"
+                          />
+                        </svg>
+                      </button>
+                    </div>
+                  </th>
+                );
+              })}
               <th scope="col" className="px-4 py-3 font-semibold w-20 text-center">
                 Action
               </th>
@@ -358,12 +471,14 @@ export default function DataTable({ config, onUpdate }: DataTableProps) {
                   <td className="px-4 py-3 text-center text-gray-500 font-medium">
                     {rowIndex + 1}
                   </td>
-                  {config.columns.map((col, colIdx) => (
+                  {draft.columns.map((col, colIdx) => (
                     <td key={colIdx} className="px-3 py-2 text-gray-700">
                       <input
                         type="text"
                         value={row[col] !== undefined ? String(row[col]) : ""}
                         onChange={(e) => handleCellChange(rowIndex, col, e.target.value)}
+                        onBlur={() => handleCellBlur(rowIndex, col)}
+                        {...lockProps}
                         className="w-full bg-transparent border-b border-transparent hover:border-gray-200 focus:border-[#003366] focus:outline-none px-1 py-0.5 text-sm"
                         placeholder="Empty cell"
                       />
@@ -395,7 +510,7 @@ export default function DataTable({ config, onUpdate }: DataTableProps) {
             ) : (
               <tr>
                 <td
-                  colSpan={config.columns.length + 2}
+                  colSpan={draft.columns.length + 2}
                   className="px-4 py-8 text-center text-gray-500"
                 >
                   No matching records found.
@@ -406,7 +521,7 @@ export default function DataTable({ config, onUpdate }: DataTableProps) {
         </table>
       </div>
       <div className="mt-2 text-xs text-gray-400 text-right">
-        Showing {filteredRows.length} of {config.rows.length} records
+        Showing {filteredRows.length} of {draft.rows.length} records
       </div>
     </div>
   );

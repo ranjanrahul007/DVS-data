@@ -1,44 +1,133 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { portalConfig, TableConfig } from "./tableConfig";
-import DataTable from "@/components/DataTable";
+import DataTable, { CommitDescriptor } from "@/components/DataTable";
+import HistoryDropdown from "@/components/HistoryDropdown";
+import { useAuth } from "@/components/AuthProvider";
 
 type Tab = "home" | "tables" | "about" | "contact";
 
 export default function Home() {
+  const router = useRouter();
+  const { user, loading: authLoading, logout } = useAuth();
+
   const [activeTab, setActiveTab] = useState<Tab>("home");
   const [tables, setTables] = useState<TableConfig[]>([]);
-  const [isMounted, setIsMounted] = useState(false);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Bumped after any change so the history dropdown refetches.
+  const [historyReloadKey, setHistoryReloadKey] = useState(0);
 
+  // Load the authoritative table data from the server.
   useEffect(() => {
-    const saved = localStorage.getItem("datagov_tables");
-    if (saved) {
+    let active = true;
+    (async () => {
       try {
-        setTables(JSON.parse(saved));
-      } catch (e) {
-        setTables(portalConfig.tables);
+        const res = await fetch("/api/tables", { cache: "no-store" });
+        const data = await res.json();
+        if (active) setTables(data.tables ?? []);
+      } catch {
+        if (active) setError("Could not load data from the server.");
+      } finally {
+        if (active) setIsLoaded(true);
       }
-    } else {
-      setTables(portalConfig.tables);
-    }
-    setIsMounted(true);
+    })();
+    return () => {
+      active = false;
+    };
   }, []);
 
-  const handleUpdateTable = (updatedTable: TableConfig) => {
-    const updated = tables.map((t) => (t.id === updatedTable.id ? updatedTable : t));
-    setTables(updated);
-    localStorage.setItem("datagov_tables", JSON.stringify(updated));
-  };
+  const goToLogin = useCallback(() => {
+    router.push(`/login?redirect=${encodeURIComponent("/")}`);
+  }, [router]);
 
-  const handleReset = () => {
-    if (window.confirm("Are you sure you want to reset all tables to their default state? This will erase your custom edits.")) {
-      setTables(portalConfig.tables);
-      localStorage.removeItem("datagov_tables");
+  /** Persist a single table change and record it in the audit log. */
+  const handleCommit = useCallback(
+    async (updated: TableConfig, descriptor: CommitDescriptor): Promise<boolean> => {
+      if (!user) {
+        goToLogin();
+        return false;
+      }
+      const nextTables = tables.map((t) => (t.id === updated.id ? updated : t));
+      try {
+        const res = await fetch("/api/tables", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: descriptor.action,
+            tableId: updated.id,
+            description: descriptor.description,
+            tables: nextTables,
+          }),
+        });
+        if (!res.ok) {
+          if (res.status === 401) goToLogin();
+          const data = await res.json().catch(() => ({}));
+          setError(data.error ?? "Could not save your change.");
+          return false;
+        }
+        const data = await res.json();
+        setTables(data.tables);
+        setError(null);
+        setHistoryReloadKey((k) => k + 1);
+        return true;
+      } catch {
+        setError("Network error while saving.");
+        return false;
+      }
+    },
+    [user, tables, goToLogin],
+  );
+
+  const handleReset = useCallback(async () => {
+    if (!user) {
+      goToLogin();
+      return;
     }
-  };
+    if (
+      !window.confirm(
+        "Reset all tables to their default state? This will erase the current data for everyone.",
+      )
+    )
+      return;
+    try {
+      const res = await fetch("/api/tables", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "reset",
+          description: "Reset all tables to defaults",
+        }),
+      });
+      if (!res.ok) {
+        if (res.status === 401) goToLogin();
+        const data = await res.json().catch(() => ({}));
+        setError(data.error ?? "Could not reset.");
+        return;
+      }
+      const data = await res.json();
+      setTables(data.tables);
+      setError(null);
+      setHistoryReloadKey((k) => k + 1);
+    } catch {
+      setError("Network error while resetting.");
+    }
+  }, [user, goToLogin]);
 
-  // Config-driven values for the Hero Strip depending on the tab
+  // Reload tables after a revert performed from the history dropdown.
+  const handleReverted = useCallback(async () => {
+    try {
+      const res = await fetch("/api/tables", { cache: "no-store" });
+      const data = await res.json();
+      setTables(data.tables ?? []);
+      setHistoryReloadKey((k) => k + 1);
+    } catch {
+      setError("Could not reload data after revert.");
+    }
+  }, []);
+
   const getHeroDetails = () => {
     switch (activeTab) {
       case "home":
@@ -49,7 +138,7 @@ export default function Home() {
       case "tables":
         return {
           title: "Interactive Public Data Tables Directory",
-          meta: `Total Datasets: ${tables.length} | Edits are saved locally in your browser`,
+          meta: `Total Datasets: ${tables.length} | Changes are saved to the server`,
         };
       case "about":
         return {
@@ -65,8 +154,9 @@ export default function Home() {
   };
 
   const hero = getHeroDetails();
+  const showHistory = activeTab === "home" || activeTab === "tables";
 
-  if (!isMounted) {
+  if (!isLoaded) {
     return (
       <div className="min-h-screen bg-[#f8fafc] flex items-center justify-center">
         <span className="text-[#003366] font-semibold">Loading Data Portal...</span>
@@ -80,7 +170,6 @@ export default function Home() {
       <header className="bg-[#003366] text-white py-4 px-4 sm:px-6 md:px-8 border-b-4 border-[#FFB300]">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            {/* National Emblem style SVG / Logo */}
             <svg
               className="w-10 h-10 text-[#FFB300] shrink-0"
               fill="none"
@@ -103,24 +192,44 @@ export default function Home() {
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
             <button
               onClick={handleReset}
               className="bg-[#002244] border border-gray-400 hover:bg-[#FFB300] hover:text-[#002244] hover:border-[#FFB300] text-gray-200 text-xs font-semibold px-3 py-1.5 transition duration-150 cursor-pointer"
             >
               Reset to Defaults
             </button>
-            <div className="text-xs text-right hidden md:block">
-              <span className="bg-[#002244] px-3 py-1 text-gray-300 font-mono">
-                SECURE PORTAL
-              </span>
-            </div>
+
+            {/* Auth control */}
+            {authLoading ? (
+              <span className="text-xs text-gray-400">…</span>
+            ) : user ? (
+              <div className="flex items-center gap-2 text-xs">
+                <span className="hidden sm:inline text-gray-300">
+                  Signed in as{" "}
+                  <span className="font-semibold text-white">{user.username}</span>
+                </span>
+                <button
+                  onClick={() => logout()}
+                  className="bg-[#002244] border border-gray-400 hover:bg-white hover:text-[#002244] text-gray-200 font-semibold px-3 py-1.5 transition duration-150 cursor-pointer"
+                >
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={goToLogin}
+                className="bg-[#FFB300] text-[#002244] hover:bg-white text-xs font-semibold px-3 py-1.5 transition duration-150 cursor-pointer"
+              >
+                Sign In
+              </button>
+            )}
           </div>
         </div>
       </header>
 
       {/* 2. Navigation Bar */}
-      <nav className="bg-[#002244] text-white sticky top-0 z-50">
+      <nav className="bg-[#002244] text-white sticky top-0 z-40">
         <div className="max-w-7xl mx-auto flex flex-wrap">
           {(["home", "tables", "about", "contact"] as Tab[]).map((tab) => {
             const isActive = activeTab === tab;
@@ -143,27 +252,58 @@ export default function Home() {
 
       {/* 3. Hero / Page Title strip */}
       <section className="bg-blue-50 border-b border-blue-100 py-6 px-4 sm:px-6 md:px-8">
-        <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-3">
           <div>
             <h2 className="text-2xl font-bold text-[#002244]">{hero.title}</h2>
             <p className="text-xs text-gray-500 mt-1">{hero.meta}</p>
           </div>
-          <div className="text-xs text-gray-400">
-            Current Path: <span className="font-mono text-[#003366]">{`/${activeTab}`}</span>
+          <div className="flex items-center gap-4">
+            {showHistory && (
+              <HistoryDropdown
+                canRevert={!!user}
+                reloadKey={historyReloadKey}
+                onReverted={handleReverted}
+              />
+            )}
+            <div className="text-xs text-gray-400 hidden sm:block">
+              Current Path:{" "}
+              <span className="font-mono text-[#003366]">{`/${activeTab}`}</span>
+            </div>
           </div>
         </div>
       </section>
 
+      {/* Error banner */}
+      {error && (
+        <div className="bg-red-50 border-b border-red-200 px-4 sm:px-6 md:px-8 py-2">
+          <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
+            <span className="text-sm text-red-700">{error}</span>
+            <button
+              onClick={() => setError(null)}
+              className="text-red-500 hover:text-red-800 text-xs font-semibold cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main Content Area */}
       <main className="flex-grow max-w-7xl w-full mx-auto p-4 sm:p-6 md:p-8">
-        {/* Dynamic content rendering based on activeTab */}
-        {(activeTab === "home" || activeTab === "tables") && (
+        {showHistory && (
           <div className="space-y-8">
+            {!user && (
+              <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm px-4 py-3">
+                You are viewing as a guest. <button onClick={goToLogin} className="font-semibold underline cursor-pointer">Sign in</button> to add, edit, or revert data.
+              </div>
+            )}
             {tables.map((table) => (
               <DataTable
                 key={table.id}
                 config={table}
-                onUpdate={handleUpdateTable}
+                canEdit={!!user}
+                onCommit={handleCommit}
+                onAuthRequired={goToLogin}
               />
             ))}
           </div>
@@ -207,7 +347,10 @@ export default function Home() {
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  alert("Feedback submitted successfully. Reference ID: " + Math.floor(100000 + Math.random() * 900000));
+                  alert(
+                    "Feedback submitted successfully. Reference ID: " +
+                      Math.floor(100000 + Math.random() * 900000),
+                  );
                 }}
                 className="space-y-4"
               >

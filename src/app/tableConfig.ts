@@ -3,7 +3,7 @@ export interface TableConfig {
   tableTitle: string;
   tableSubtitle: string;
   columns: string[];
-  rows: Record<string, any>[];
+  rows: Record<string, unknown>[];
 }
 
 export interface PortalConfig {
