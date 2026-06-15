@@ -148,7 +148,7 @@ export default function Home() {
       case "contact":
         return {
           title: "Contact & Support Desk",
-          meta: "Get in touch with the data administrators and grievance team",
+          meta: "Get in touch with the data administrators",
         };
     }
   };
@@ -339,8 +339,7 @@ export default function Home() {
         )}
 
         {activeTab === "contact" && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="bg-white border border-gray-200 p-6 lg:col-span-2">
+          <div className="bg-white border border-gray-200 p-6">
               <h3 className="text-lg font-bold text-[#003366] border-b border-gray-100 pb-2 mb-4">
                 Leave a Query or Feedback
               </h3>
@@ -407,25 +406,6 @@ export default function Home() {
                   Submit Query
                 </button>
               </form>
-            </div>
-
-            <div className="bg-white border border-gray-200 p-6 space-y-6">
-              <div>
-                <h4 className="font-bold text-[#002244] text-sm">Grievance Officer</h4>
-                <p className="text-xs text-gray-500 mt-1">Shri R. K. Sen, Joint Secretary</p>
-                <p className="text-xs text-gray-500">Ministry of Electronics & IT</p>
-              </div>
-              <div className="border-t border-gray-100 pt-4">
-                <h4 className="font-bold text-[#002244] text-sm">Office Address</h4>
-                <p className="text-xs text-gray-500 mt-1">Electronics Niketan, 6, CGO Complex,</p>
-                <p className="text-xs text-gray-500">Lodhi Road, New Delhi - 110003</p>
-              </div>
-              <div className="border-t border-gray-100 pt-4">
-                <h4 className="font-bold text-[#002244] text-sm">Contact Channels</h4>
-                <p className="text-xs text-gray-500 mt-1">Email: contact@datagov.gov.in</p>
-                <p className="text-xs text-gray-500">Phone: +91-11-24301900</p>
-              </div>
-            </div>
           </div>
         )}
       </main>
