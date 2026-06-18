@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useDeferredValue, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { portalConfig, TableConfig } from "./tableConfig";
 import DataTable, { CommitDescriptor } from "@/components/DataTable";
@@ -17,8 +17,10 @@ export default function Home() {
   const [tables, setTables] = useState<TableConfig[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [masterSearchQuery, setMasterSearchQuery] = useState("");
   // Bumped after any change so the history dropdown refetches.
   const [historyReloadKey, setHistoryReloadKey] = useState(0);
+  const deferredMasterSearchQuery = useDeferredValue(masterSearchQuery);
 
   // Load the authoritative table data from the server.
   useEffect(() => {
@@ -297,6 +299,25 @@ export default function Home() {
                 You are viewing as a guest. <button onClick={goToLogin} className="font-semibold underline cursor-pointer">Sign in</button> to add, edit, or revert data.
               </div>
             )}
+            <div className="bg-white border border-gray-200 p-4 sm:p-5">
+              <label
+                htmlFor="master-table-search"
+                className="block text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2"
+              >
+                Master Search
+              </label>
+              <input
+                id="master-table-search"
+                type="text"
+                value={masterSearchQuery}
+                onChange={(e) => setMasterSearchQuery(e.target.value)}
+                placeholder="Type a name or part of a name to filter matching rows"
+                className="w-full px-3 py-2.5 text-sm border border-gray-300 focus:outline-none focus:border-[#003366] focus:ring-1 focus:ring-[#003366]"
+              />
+              <p className="mt-2 text-xs text-gray-500">
+                Search is case-insensitive and prioritizes rows whose name fields match first.
+              </p>
+            </div>
             {tables.map((table) => (
               <DataTable
                 key={table.id}
@@ -304,6 +325,7 @@ export default function Home() {
                 canEdit={!!user}
                 onCommit={handleCommit}
                 onAuthRequired={goToLogin}
+                externalSearchQuery={deferredMasterSearchQuery}
               />
             ))}
           </div>

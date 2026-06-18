@@ -11,6 +11,7 @@ export interface CommitDescriptor {
 
 interface DataTableProps {
   config: TableConfig;
+  externalSearchQuery?: string;
   /** Whether the current visitor is allowed to edit. */
   canEdit: boolean;
   /**
@@ -24,11 +25,11 @@ interface DataTableProps {
 
 export default function DataTable({
   config,
+  externalSearchQuery = "",
   canEdit,
   onCommit,
   onAuthRequired,
 }: DataTableProps) {
-  const [searchQuery, setSearchQuery] = useState("");
   // Local working copy. Keystrokes update this instantly; we persist (and log
   // history) only on blur / structural actions to avoid one entry per keypress.
   const [draft, setDraft] = useState<TableConfig>(config);
@@ -46,15 +47,35 @@ export default function DataTable({
     setDraft(config);
   }
 
-  const filteredRows = draft.rows.filter((row) => {
-    if (!searchQuery) return true;
-    const query = searchQuery.toLowerCase();
-    return draft.columns.some((col) => {
-      const cellValue = row[col];
-      if (cellValue === null || cellValue === undefined) return false;
-      return String(cellValue).toLowerCase().includes(query);
-    });
-  });
+  const normalizedQuery = externalSearchQuery.trim().toLowerCase();
+  const rowsWithIndex = draft.rows.map((row, originalIndex) => ({ row, originalIndex }));
+  const nameColumns = draft.columns.filter((col) => col.toLowerCase().includes("name"));
+
+  const getCellsForColumns = (row: Record<string, unknown>, columns: string[]) =>
+    columns
+      .map((col) => row[col])
+      .filter((value) => value !== null && value !== undefined)
+      .map((value) => String(value).toLowerCase());
+
+  const getMatchRank = (values: string[]) => {
+    if (values.some((value) => value.startsWith(normalizedQuery))) return 0;
+    if (values.some((value) => value.includes(normalizedQuery))) return 1;
+    return Number.POSITIVE_INFINITY;
+  };
+
+  const filteredRows = !normalizedQuery
+    ? rowsWithIndex
+    : rowsWithIndex
+        .map(({ row, originalIndex }) => {
+          const nameValues = getCellsForColumns(row, nameColumns);
+          const allValues = getCellsForColumns(row, draft.columns);
+          const nameRank = getMatchRank(nameValues);
+          const fallbackRank = getMatchRank(allValues);
+          const rank = Number.isFinite(nameRank) ? nameRank : fallbackRank + 2;
+          return { row, originalIndex, rank };
+        })
+        .filter(({ rank }) => Number.isFinite(rank))
+        .sort((a, b) => a.rank - b.rank || a.originalIndex - b.originalIndex);
 
   /** Optimistically apply a change, persist it, and roll back on failure. */
   const doCommit = async (newConfig: TableConfig, descriptor: CommitDescriptor) => {
@@ -127,7 +148,7 @@ export default function DataTable({
   // --- Cells ----------------------------------------------------------------
 
   const handleCellChange = (rowIndex: number, col: string, value: string) => {
-    const originalIndex = draft.rows.indexOf(filteredRows[rowIndex]);
+    const originalIndex = filteredRows[rowIndex]?.originalIndex ?? -1;
     if (originalIndex === -1) return;
     const newRows = [...draft.rows];
     newRows[originalIndex] = { ...newRows[originalIndex], [col]: value };
@@ -135,7 +156,7 @@ export default function DataTable({
   };
 
   const handleCellBlur = (rowIndex: number, col: string) => {
-    const originalIndex = draft.rows.indexOf(filteredRows[rowIndex]);
+    const originalIndex = filteredRows[rowIndex]?.originalIndex ?? -1;
     if (originalIndex === -1) return;
     const newVal = String(draft.rows[originalIndex]?.[col] ?? "");
     const oldVal = String(config.rows[originalIndex]?.[col] ?? "");
@@ -162,7 +183,7 @@ export default function DataTable({
 
   const handleDeleteRow = (rowIndex: number) => {
     if (!canEdit) return onAuthRequired();
-    const originalIndex = draft.rows.indexOf(filteredRows[rowIndex]);
+    const originalIndex = filteredRows[rowIndex]?.originalIndex ?? -1;
     if (originalIndex === -1) return;
     const newRows = draft.rows.filter((_, idx) => idx !== originalIndex);
     doCommit(
@@ -219,7 +240,7 @@ export default function DataTable({
     const csvRows = [
       headers.map((h) => `"${String(h).replace(/"/g, '""')}"`).join(","),
     ];
-    filteredRows.forEach((row, index) => {
+    filteredRows.forEach(({ row }, index) => {
       const rowValues = [
         String(index + 1),
         ...draft.columns.map((col) => {
@@ -283,7 +304,7 @@ export default function DataTable({
             <tbody>
               ${filteredRows
                 .map(
-                  (row, index) => `
+                  ({ row }, index) => `
                 <tr>
                   <td>${index + 1}</td>
                   ${draft.columns.map((col) => `<td>${escapeHtml(row[col])}</td>`).join("")}
@@ -374,21 +395,6 @@ export default function DataTable({
         </div>
       </div>
 
-      {/* Filter / Search Input */}
-      <div className="mb-4">
-        <label htmlFor={`search-${draft.id}`} className="sr-only">
-          Search Table
-        </label>
-        <input
-          id={`search-${draft.id}`}
-          type="text"
-          placeholder="Search within table..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full md:w-80 px-3 py-2 text-sm border border-gray-300 focus:outline-none focus:border-[#003366] focus:ring-1 focus:ring-[#003366]"
-        />
-      </div>
-
       {/* Table Element */}
       <div className="overflow-x-auto border border-gray-200">
         <table className="min-w-full divide-y divide-gray-200 text-left text-sm">
@@ -463,7 +469,7 @@ export default function DataTable({
           </thead>
           <tbody className="divide-y divide-gray-200 bg-white">
             {filteredRows.length > 0 ? (
-              filteredRows.map((row, rowIndex) => (
+              filteredRows.map(({ row }, rowIndex) => (
                 <tr
                   key={rowIndex}
                   className={rowIndex % 2 === 1 ? "bg-blue-50/50" : "bg-white"}
