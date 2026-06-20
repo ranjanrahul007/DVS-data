@@ -4,6 +4,17 @@ export interface TableConfig {
   tableSubtitle: string;
   columns: string[];
   rows: Record<string, unknown>[];
+  meta?: {
+    sourceFile?: string;
+    sourceFileType?: string;
+    createdAt?: string;
+    columns?: Array<{ id: number; name: string; orderIndex: number }>;
+    rows?: Array<{
+      id: number;
+      rowNumber: number;
+      cellsByColumnId: Record<number, { id: number | null; value: string }>;
+    }>;
+  };
 }
 
 export interface PortalConfig {

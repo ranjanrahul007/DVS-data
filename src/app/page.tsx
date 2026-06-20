@@ -2,10 +2,17 @@
 
 import React, { useCallback, useDeferredValue, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { portalConfig, TableConfig } from "./tableConfig";
-import DataTable, { CommitDescriptor } from "@/components/DataTable";
+import { portalConfig } from "./tableConfig";
+import BackendDataTable from "@/components/BackendDataTable";
 import HistoryDropdown from "@/components/HistoryDropdown";
 import { useAuth } from "@/components/AuthProvider";
+import {
+  confirmImport,
+  fetchTableSummaries,
+  previewImport,
+  type ImportPreview,
+  type TableSummary,
+} from "@/lib/tableApi";
 
 type Tab = "home" | "tables" | "about" | "contact";
 
@@ -14,12 +21,13 @@ export default function Home() {
   const { user, loading: authLoading, logout } = useAuth();
 
   const [activeTab, setActiveTab] = useState<Tab>("home");
-  const [tables, setTables] = useState<TableConfig[]>([]);
+  const [tables, setTables] = useState<TableSummary[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [masterSearchQuery, setMasterSearchQuery] = useState("");
-  // Bumped after any change so the history dropdown refetches.
-  const [historyReloadKey, setHistoryReloadKey] = useState(0);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
   const deferredMasterSearchQuery = useDeferredValue(masterSearchQuery);
 
   // Load the authoritative table data from the server.
@@ -27,11 +35,10 @@ export default function Home() {
     let active = true;
     (async () => {
       try {
-        const res = await fetch("/api/tables", { cache: "no-store" });
-        const data = await res.json();
-        if (active) setTables(data.tables ?? []);
+        const data = await fetchTableSummaries();
+        if (active) setTables(data);
       } catch {
-        if (active) setError("Could not load data from the server.");
+        if (active) setError("Backend unavailable. Showing fallback table data.");
       } finally {
         if (active) setIsLoaded(true);
       }
@@ -45,90 +52,45 @@ export default function Home() {
     router.push(`/login?redirect=${encodeURIComponent("/")}`);
   }, [router]);
 
-  /** Persist a single table change and record it in the audit log. */
-  const handleCommit = useCallback(
-    async (updated: TableConfig, descriptor: CommitDescriptor): Promise<boolean> => {
-      if (!user) {
-        goToLogin();
-        return false;
-      }
-      const nextTables = tables.map((t) => (t.id === updated.id ? updated : t));
-      try {
-        const res = await fetch("/api/tables", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: descriptor.action,
-            tableId: updated.id,
-            description: descriptor.description,
-            tables: nextTables,
-          }),
-        });
-        if (!res.ok) {
-          if (res.status === 401) goToLogin();
-          const data = await res.json().catch(() => ({}));
-          setError(data.error ?? "Could not save your change.");
-          return false;
-        }
-        const data = await res.json();
-        setTables(data.tables);
-        setError(null);
-        setHistoryReloadKey((k) => k + 1);
-        return true;
-      } catch {
-        setError("Network error while saving.");
-        return false;
-      }
-    },
-    [user, tables, goToLogin],
-  );
-
-  const handleReset = useCallback(async () => {
-    if (!user) {
-      goToLogin();
-      return;
-    }
-    if (
-      !window.confirm(
-        "Reset all tables to their default state? This will erase the current data for everyone.",
-      )
-    )
-      return;
+  const reloadTables = useCallback(async () => {
     try {
-      const res = await fetch("/api/tables", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "reset",
-          description: "Reset all tables to defaults",
-        }),
-      });
-      if (!res.ok) {
-        if (res.status === 401) goToLogin();
-        const data = await res.json().catch(() => ({}));
-        setError(data.error ?? "Could not reset.");
-        return;
-      }
-      const data = await res.json();
-      setTables(data.tables);
+      const data = await fetchTableSummaries();
+      setTables(data);
       setError(null);
-      setHistoryReloadKey((k) => k + 1);
     } catch {
-      setError("Network error while resetting.");
-    }
-  }, [user, goToLogin]);
-
-  // Reload tables after a revert performed from the history dropdown.
-  const handleReverted = useCallback(async () => {
-    try {
-      const res = await fetch("/api/tables", { cache: "no-store" });
-      const data = await res.json();
-      setTables(data.tables ?? []);
-      setHistoryReloadKey((k) => k + 1);
-    } catch {
-      setError("Could not reload data after revert.");
+      setError("Backend unavailable. Showing fallback table data.");
     }
   }, []);
+
+  const handlePreviewImport = useCallback(async () => {
+    if (!selectedFile) return;
+    setIsImporting(true);
+    try {
+      const preview = await previewImport(selectedFile);
+      setImportPreview(preview);
+      setError(null);
+    } catch (previewError) {
+      setError(previewError instanceof Error ? previewError.message : "Could not parse file.");
+    } finally {
+      setIsImporting(false);
+    }
+  }, [selectedFile]);
+
+  const handleConfirmImport = useCallback(async () => {
+    if (!selectedFile) return;
+    setIsImporting(true);
+    try {
+      await confirmImport(selectedFile);
+      await reloadTables();
+      setImportPreview(null);
+      setSelectedFile(null);
+      setError(null);
+    } catch (importError) {
+      setError(importError instanceof Error ? importError.message : "Could not import file.");
+    } finally {
+      setIsImporting(false);
+    }
+  }, [reloadTables, selectedFile]);
 
   const getHeroDetails = () => {
     switch (activeTab) {
@@ -195,14 +157,6 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <button
-              onClick={handleReset}
-              className="bg-[#002244] border border-gray-400 hover:bg-[#FFB300] hover:text-[#002244] hover:border-[#FFB300] text-gray-200 text-xs font-semibold px-3 py-1.5 transition duration-150 cursor-pointer"
-            >
-              Reset to Defaults
-            </button>
-
-            {/* Auth control */}
             {authLoading ? (
               <span className="text-xs text-gray-400">…</span>
             ) : user ? (
@@ -263,8 +217,8 @@ export default function Home() {
             {showHistory && (
               <HistoryDropdown
                 canRevert={!!user}
-                reloadKey={historyReloadKey}
-                onReverted={handleReverted}
+                reloadKey={0}
+                onReverted={reloadTables}
               />
             )}
             <div className="text-xs text-gray-400 hidden sm:block">
@@ -300,6 +254,39 @@ export default function Home() {
               </div>
             )}
             <div className="bg-white border border-gray-200 p-4 sm:p-5">
+              <div className="mb-5 border-b border-gray-100 pb-4">
+                <label
+                  htmlFor="table-file-upload"
+                  className="block text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2"
+                >
+                  Import Custom Table
+                </label>
+                <div className="flex flex-col gap-3 md:flex-row md:items-center">
+                  <input
+                    id="table-file-upload"
+                    type="file"
+                    accept=".xlsx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0] ?? null;
+                      setSelectedFile(file);
+                      setImportPreview(null);
+                    }}
+                    className="block w-full text-sm text-gray-600 file:mr-4 file:border-0 file:bg-[#003366] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-[#002244]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handlePreviewImport()}
+                    disabled={!selectedFile || isImporting}
+                    className="px-4 py-2 text-xs font-semibold text-white bg-[#003366] disabled:bg-gray-300 transition duration-150 cursor-pointer"
+                  >
+                    {isImporting ? "Parsing..." : "Preview Import"}
+                  </button>
+                </div>
+                <p className="mt-2 text-xs text-gray-500">
+                  Upload Excel or PDF table exports. PDF parsing is preview-first because table extraction can be imperfect.
+                </p>
+              </div>
+
               <label
                 htmlFor="master-table-search"
                 className="block text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2"
@@ -317,13 +304,64 @@ export default function Home() {
               <p className="mt-2 text-xs text-gray-500">
                 Search is case-insensitive and prioritizes rows whose name fields match first.
               </p>
+
+              {importPreview && (
+                <div className="mt-5 border border-blue-200 bg-blue-50 p-4">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-[#003366]">
+                        Preview: {importPreview.tableName}
+                      </div>
+                      <div className="mt-1 text-xs text-gray-600">
+                        {importPreview.totalRows} rows, {importPreview.totalColumns} columns, source {importPreview.sourceFilename}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleConfirmImport()}
+                      disabled={isImporting}
+                      className="px-4 py-2 text-xs font-semibold text-white bg-[#003366] disabled:bg-gray-300 transition duration-150 cursor-pointer"
+                    >
+                      {isImporting ? "Importing..." : "Confirm Import"}
+                    </button>
+                  </div>
+                  {importPreview.warnings.length > 0 && (
+                    <div className="mt-3 text-xs text-amber-800">
+                      {importPreview.warnings.join(" ")}
+                    </div>
+                  )}
+                  <div className="mt-4 overflow-x-auto border border-blue-100 bg-white">
+                    <table className="min-w-full text-left text-xs">
+                      <thead className="bg-[#003366] text-white">
+                        <tr>
+                          {importPreview.columns.map((column) => (
+                            <th key={column} className="px-3 py-2 font-semibold">
+                              {column}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {importPreview.rows.map((row, rowIndex) => (
+                          <tr key={`${rowIndex}-${row.join("|")}`} className={rowIndex % 2 ? "bg-blue-50/50" : "bg-white"}>
+                            {row.map((cell, cellIndex) => (
+                              <td key={`${rowIndex}-${cellIndex}`} className="px-3 py-2 text-gray-700">
+                                {cell}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
             {tables.map((table) => (
-              <DataTable
+              <BackendDataTable
                 key={table.id}
-                config={table}
+                tableId={String(table.id)}
                 canEdit={!!user}
-                onCommit={handleCommit}
                 onAuthRequired={goToLogin}
                 externalSearchQuery={deferredMasterSearchQuery}
               />
