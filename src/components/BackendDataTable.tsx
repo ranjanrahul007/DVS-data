@@ -20,16 +20,22 @@ export default function BackendDataTable({
   const [table, setTable] = useState<TableConfig | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [filteredRows, setFilteredRows] = useState<Record<string, unknown>[]>([]);
+  const [displayRowIndices, setDisplayRowIndices] = useState<number[]>([]);
 
-  const loadTable = useCallback(async (query = "") => {
+  const loadTable = useCallback(async () => {
     setIsLoading(true);
     try {
-      const data = await fetchTable(tableId, query);
+      const data = await fetchTable(tableId);
       setTable(data);
       setError(null);
+      setFilteredRows(data.rows);
+      setDisplayRowIndices(data.rows.map((_, index) => index));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load table.");
+      setTable(null);
+      setFilteredRows([]);
+      setDisplayRowIndices([]);
     } finally {
       setIsLoading(false);
     }
@@ -44,9 +50,14 @@ export default function BackendDataTable({
         if (!active) return;
         setTable(data);
         setError(null);
+        setFilteredRows(data.rows);
+        setDisplayRowIndices(data.rows.map((_, index) => index));
       } catch (loadError) {
         if (!active) return;
         setError(loadError instanceof Error ? loadError.message : "Could not load table.");
+        setTable(null);
+        setFilteredRows([]);
+        setDisplayRowIndices([]);
       } finally {
         if (active) setIsLoading(false);
       }
@@ -57,28 +68,55 @@ export default function BackendDataTable({
   }, [tableId]);
 
   useEffect(() => {
-    if (searchTimer.current) clearTimeout(searchTimer.current);
-    searchTimer.current = setTimeout(() => {
-      void loadTable(externalSearchQuery);
-    }, 250);
+    if (!table) {
+      setFilteredRows([]);
+      setDisplayRowIndices([]);
+      return;
+    }
 
-    return () => {
-      if (searchTimer.current) clearTimeout(searchTimer.current);
-    };
-  }, [externalSearchQuery, loadTable, tableId]);
+    const query = externalSearchQuery.trim().toLowerCase();
+    if (!query) {
+      setFilteredRows(table.rows);
+      setDisplayRowIndices(table.rows.map((_, index) => index));
+      return;
+    }
+
+    const filtered: Record<string, unknown>[] = [];
+    const indices: number[] = [];
+
+    table.rows.forEach((row, index) => {
+      const matches = Object.values(row).some((value) =>
+        String(value ?? "").toLowerCase().includes(query),
+      );
+      if (matches) {
+        filtered.push(row);
+        indices.push(index);
+      }
+    });
+
+    setFilteredRows(filtered);
+    setDisplayRowIndices(indices);
+  }, [externalSearchQuery, table]);
 
   const updateLocalCell = (rowIndex: number, columnName: string, value: string) => {
+    const actualRowIndex = displayRowIndices[rowIndex] ?? rowIndex;
     setTable((current) => {
       if (!current) return current;
       const nextRows = [...current.rows];
-      nextRows[rowIndex] = { ...nextRows[rowIndex], [columnName]: value };
+      nextRows[actualRowIndex] = { ...nextRows[actualRowIndex], [columnName]: value };
       return { ...current, rows: nextRows };
+    });
+    setFilteredRows((current) => {
+      const nextRows = [...current];
+      nextRows[rowIndex] = { ...nextRows[rowIndex], [columnName]: value };
+      return nextRows;
     });
   };
 
   const getCellId = (rowIndex: number, columnName: string) => {
     if (!table?.meta?.rows || !table.meta.columns) return null;
-    const rowMeta = table.meta.rows[rowIndex];
+    const tableRowIndex = displayRowIndices[rowIndex];
+    const rowMeta = table.meta.rows[tableRowIndex];
     const columnMeta = table.meta.columns.find((column) => column.name === columnName);
     if (!rowMeta || !columnMeta) return null;
     return rowMeta.cellsByColumnId[columnMeta.id]?.id ?? null;
@@ -88,11 +126,11 @@ export default function BackendDataTable({
     const cellId = getCellId(rowIndex, columnName);
     if (!cellId || !table) return;
     try {
-      await patchCell(cellId, String(table.rows[rowIndex]?.[columnName] ?? ""));
+      await patchCell(cellId, String(filteredRows[rowIndex]?.[columnName] ?? ""));
       setError(null);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Could not save cell.");
-      void loadTable(externalSearchQuery);
+      void loadTable();
     }
   };
 
@@ -100,7 +138,7 @@ export default function BackendDataTable({
     if (!canEdit) return onAuthRequired();
     try {
       await createRow(tableId);
-      await loadTable(externalSearchQuery);
+      await loadTable();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Could not add row.");
     }
@@ -118,7 +156,7 @@ export default function BackendDataTable({
     }
     try {
       await createColumn(tableId, candidate);
-      await loadTable(externalSearchQuery);
+      await loadTable();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Could not add column.");
     }
@@ -203,11 +241,11 @@ export default function BackendDataTable({
               </tr>
             </thead>
             <tbody>
-              ${table.rows
+              ${filteredRows
                 .map(
                   (row, index) => `
                     <tr>
-                      <td>${index + 1}</td>
+                      <td>${displayRowIndices[index] + 1}</td>
                       ${table.columns.map((col) => `<td>${escapeHtml(row[col])}</td>`).join("")}
                     </tr>`,
                 )
@@ -304,11 +342,11 @@ export default function BackendDataTable({
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200 bg-white">
-            {table.rows.length > 0 ? (
-              table.rows.map((row, rowIndex) => (
-                <tr key={rowIndex} className={rowIndex % 2 === 1 ? "bg-blue-50/50" : "bg-white"}>
+            {filteredRows.length > 0 ? (
+              filteredRows.map((row, rowIndex) => (
+                <tr key={displayRowIndices[rowIndex]} className={rowIndex % 2 === 1 ? "bg-blue-50/50" : "bg-white"}>
                   <td className="px-4 py-3 text-center text-gray-500 font-medium">
-                    {rowIndex + 1}
+                    {displayRowIndices[rowIndex] + 1}
                   </td>
                   {table.columns.map((col, colIdx) => (
                     <td key={colIdx} className="px-3 py-2 text-gray-700">
@@ -339,7 +377,7 @@ export default function BackendDataTable({
         </table>
       </div>
       <div className="mt-2 text-xs text-gray-400 text-right">
-        Showing {table.rows.length} records
+        Showing {filteredRows.length} of {table.rows.length} records
       </div>
     </div>
   );

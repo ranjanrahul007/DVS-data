@@ -1,11 +1,11 @@
-import xlsx from "xlsx";
+import { read, utils } from "xlsx";
 import pdf from "pdf-parse";
 import { normalizeImportedGrid } from "./utils.js";
 
 export function parseExcelTable(fileBuffer, fileName) {
-  const workbook = xlsx.read(fileBuffer, { type: "buffer" });
+  const workbook = read(fileBuffer, { type: "buffer" });
   const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-  const rawRows = xlsx.utils.sheet_to_json(firstSheet, {
+  const rawRows = utils.sheet_to_json(firstSheet, {
     header: 1,
     raw: false,
     defval: "",

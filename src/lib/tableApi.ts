@@ -22,17 +22,30 @@ export interface ImportPreview {
   sourceFilename: string;
 }
 
-const API_BASE = (process.env.NEXT_PUBLIC_TABLES_API_BASE_URL || "http://localhost:4000/api").replace(
+const INTERNAL_API_BASE = "/api/table-backend";
+const API_BASE = (process.env.NEXT_PUBLIC_TABLES_API_BASE_URL || INTERNAL_API_BASE).replace(
   /\/$/,
   "",
 );
+
+async function fetchWithFallback(input: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch (error) {
+    if (API_BASE !== INTERNAL_API_BASE && input.startsWith(API_BASE)) {
+      const fallbackUrl = `${INTERNAL_API_BASE}${input.substring(API_BASE.length)}`;
+      return await fetch(fallbackUrl, init);
+    }
+    throw error;
+  }
+}
 
 async function parseJson<T>(response: Response): Promise<T> {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = typeof (data as { error?: unknown }).error === "string"
       ? (data as { error: string }).error
-      : "Request failed.";
+      : `Request failed with status ${response.status}`;
     throw new Error(error);
   }
   return data as T;
@@ -40,7 +53,7 @@ async function parseJson<T>(response: Response): Promise<T> {
 
 export async function fetchTableSummaries(): Promise<TableSummary[]> {
   try {
-    const response = await fetch(`${API_BASE}/tables`, { cache: "no-store" });
+    const response = await fetchWithFallback(`${API_BASE}/tables`, { cache: "no-store" });
     const data = await parseJson<{ tables: TableSummary[] }>(response);
     return data.tables;
   } catch {
@@ -61,7 +74,7 @@ export async function fetchTable(tableId: string, query = ""): Promise<TableConf
     const url = query.trim()
       ? `${API_BASE}/tables/${tableId}/search?q=${encodeURIComponent(query)}`
       : `${API_BASE}/tables/${tableId}`;
-    const response = await fetch(url, { cache: "no-store" });
+    const response = await fetchWithFallback(url, { cache: "no-store" });
     const data = await parseJson<{ table: TableConfig }>(response);
     return data.table;
   } catch {
@@ -82,7 +95,7 @@ export async function fetchTable(tableId: string, query = ""): Promise<TableConf
 }
 
 export async function patchCell(cellId: number, value: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/cells/${cellId}`, {
+  const response = await fetchWithFallback(`${API_BASE}/cells/${cellId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ value }),
@@ -91,7 +104,7 @@ export async function patchCell(cellId: number, value: string): Promise<void> {
 }
 
 export async function createRow(tableId: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/tables/${tableId}/rows`, {
+  const response = await fetchWithFallback(`${API_BASE}/tables/${tableId}/rows`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
   });
@@ -99,7 +112,7 @@ export async function createRow(tableId: string): Promise<void> {
 }
 
 export async function createColumn(tableId: string, name: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/tables/${tableId}/columns`, {
+  const response = await fetchWithFallback(`${API_BASE}/tables/${tableId}/columns`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
@@ -110,7 +123,7 @@ export async function createColumn(tableId: string, name: string): Promise<void>
 export async function previewImport(file: File): Promise<ImportPreview> {
   const body = new FormData();
   body.append("file", file);
-  const response = await fetch(`${API_BASE}/tables/import`, {
+  const response = await fetchWithFallback(`${API_BASE}/tables/import`, {
     method: "POST",
     body,
   });
@@ -122,7 +135,7 @@ export async function confirmImport(file: File): Promise<{ id: number; rowCount:
   const body = new FormData();
   body.append("file", file);
   body.append("confirm", "true");
-  const response = await fetch(`${API_BASE}/tables/import`, {
+  const response = await fetchWithFallback(`${API_BASE}/tables/import`, {
     method: "POST",
     body,
   });
